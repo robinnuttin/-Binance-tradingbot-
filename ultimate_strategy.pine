@@ -1,0 +1,369 @@
+//@version=5
+strategy("🚀 ULTIMATE TRADING STRATEGY - 13 in 1", 
+         shorttitle="🚀 ULTIMATE", 
+         overlay=true, 
+         default_qty_type=strategy.percent_of_equity, 
+         default_qty_value=10,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=2,
+         max_bars_back=5000)
+
+// ===== STRATEGIE INSTELLINGEN ===== //
+group_main = "🎯 Hoofdinstellingen"
+group_trend = "📈 Trend Indicators" 
+group_momentum = "⚡ Momentum Indicators"
+group_volume = "📊 Volume Indicators"
+group_risk = "⚖️ Risk Management"
+group_visual = "🎨 Visualisatie"
+
+// Hoofdinstellingen
+consensus_threshold = input.float(65.0, "Consensus Drempel (%)", minval=50.0, maxval=90.0, step=5.0, group=group_main, tooltip="Minimale score voor trade signaal")
+use_regime_filter = input.bool(true, "Market Regime Filter", group=group_main, tooltip="Pas strategie aan op basis van marktregime")
+min_confirmations = input.int(3, "Min. Bevestigingen", minval=2, maxval=4, group=group_main, tooltip="Minimum aantal indicator categorieën dat moet bevestigen")
+
+// Layer Gewichten
+trend_weight = input.float(40.0, "Trend Layer Gewicht (%)", minval=0.0, maxval=100.0, step=5.0, group=group_main)
+momentum_weight = input.float(30.0, "Momentum Layer Gewicht (%)", minval=0.0, maxval=100.0, step=5.0, group=group_main)
+volume_weight = input.float(20.0, "Volume Layer Gewicht (%)", minval=0.0, maxval=100.0, step=5.0, group=group_main)
+pattern_weight = input.float(10.0, "Pattern Layer Gewicht (%)", minval=0.0, maxval=100.0, step=5.0, group=group_main)
+
+// ===== TREND INDICATORS ===== //
+// SuperTrend
+st_length = input.int(22, "SuperTrend ATR Period", group=group_trend)
+st_mult = input.float(3.0, "SuperTrend Multiplier", step=0.1, group=group_trend)
+st_src = input.source(hl2, "SuperTrend Source", group=group_trend)
+
+// Ichimoku
+ichi_turning = input.int(9, "Ichimoku Tenkan Period", group=group_trend)
+ichi_standard = input.int(26, "Ichimoku Kinjun Period", group=group_trend)
+ichi_leading = input.int(52, "Ichimoku Senkou B Period", group=group_trend)
+ichi_displacement = input.int(26, "Ichimoku Displacement", group=group_trend)
+
+// Moving Averages
+ma_fast = input.int(10, "MA Fast", group=group_trend)
+ma_medium = input.int(50, "MA Medium", group=group_trend)
+ma_slow = input.int(200, "MA Slow", group=group_trend)
+
+// ===== MOMENTUM INDICATORS ===== //
+// Ultimate RSI
+rsi_length = input.int(14, "RSI Length", group=group_momentum)
+rsi_smooth = input.int(14, "RSI Signal Smooth", group=group_momentum)
+rsi_ob = input.float(80.0, "RSI Overbought", group=group_momentum)
+rsi_os = input.float(20.0, "RSI Oversold", group=group_momentum)
+
+// Adaptive MACD
+macd_r2_length = input.int(20, "MACD R2 Period", group=group_momentum)
+macd_fast = input.int(10, "MACD Fast", group=group_momentum)
+macd_slow = input.int(20, "MACD Slow", group=group_momentum)
+macd_signal = input.int(9, "MACD Signal", group=group_momentum)
+
+// ===== VOLUME INDICATORS ===== //
+// VWAP
+vwap_anchor = input.string("Session", "VWAP Anchor", options=["Session", "Day", "Week"], group=group_volume)
+vwap_bands = input.bool(true, "VWAP Bands", group=group_volume)
+vwap_mult1 = input.float(1.0, "VWAP Band 1", step=0.1, group=group_volume)
+vwap_mult2 = input.float(2.0, "VWAP Band 2", step=0.1, group=group_volume)
+
+// OBV
+obv_length = input.int(20, "OBV Length", group=group_volume)
+
+// Volume Profile (simplified)
+vp_bars = input.int(100, "Volume Profile Bars", group=group_volume)
+
+// ===== RISK MANAGEMENT ===== //
+risk_per_trade = input.float(1.0, "Risk per Trade (%)", minval=0.1, maxval=5.0, step=0.1, group=group_risk)
+use_dynamic_sizing = input.bool(true, "Dynamic Position Sizing", group=group_risk, tooltip="Aanpassing op basis van volatiliteit")
+atr_length = input.int(20, "ATR Length", group=group_risk)
+max_drawdown = input.float(10.0, "Max Drawdown (%)", minval=1.0, maxval=50.0, group=group_risk)
+
+// Stop Loss & Take Profit
+sl_type = input.string("ATR", "Stop Loss Type", options=["ATR", "Percentage", "SuperTrend"], group=group_risk)
+sl_atr_mult = input.float(2.0, "SL ATR Multiplier", step=0.1, group=group_risk)
+sl_percentage = input.float(2.0, "SL Percentage", step=0.1, group=group_risk)
+tp_ratio = input.float(2.0, "Take Profit Ratio", step=0.1, group=group_risk, tooltip="TP = SL * ratio")
+
+// ===== VISUALISATIE ===== //
+show_signals = input.bool(true, "Toon Signalen", group=group_visual)
+show_table = input.bool(true, "Toon Score Tabel", group=group_visual)
+show_trend_fill = input.bool(true, "Toon Trend Fill", group=group_visual)
+
+// ===== BEREKENINGEN ===== //
+
+// SuperTrend Berekening
+atr = ta.atr(st_length) * st_mult
+longStop = st_src - atr
+shortStop = st_src + atr
+
+longStopPrev = nz(longStop[1], longStop)
+longStop := low[1] > longStopPrev ? math.max(longStop, longStopPrev) : longStop
+
+shortStopPrev = nz(shortStop[1], shortStop)  
+shortStop := high[1] < shortStopPrev ? math.min(shortStop, shortStopPrev) : shortStop
+
+var int st_dir = 1
+st_dir := st_dir == -1 and high > shortStopPrev ? 1 : st_dir == 1 and low < longStopPrev ? -1 : st_dir
+st_bullish = st_dir == 1
+st_bearish = st_dir == -1
+
+// Ichimoku Berekening
+donchian(len) => math.avg(ta.lowest(len), ta.highest(len))
+tenkan = donchian(ichi_turning)
+kinjun = donchian(ichi_standard)
+senkouA = math.avg(tenkan, kinjun)
+senkouB = donchian(ichi_leading)
+
+ichi_bullish = close > senkouA and senkouA > senkouB and tenkan > kinjun
+ichi_bearish = close < senkouA and senkouA < senkouB and tenkan < kinjun
+
+// Moving Averages
+ma10 = ta.sma(close, ma_fast)
+ma50 = ta.sma(close, ma_medium) 
+ma200 = ta.sma(close, ma_slow)
+
+ma_bullish = close > ma10 and ma10 > ma50 and ma50 > ma200
+ma_bearish = close < ma10 and ma10 < ma50 and ma50 < ma200
+
+// Ultimate RSI
+upper = ta.highest(close, rsi_length)
+lower = ta.lowest(close, rsi_length)
+r = upper - lower
+d = close - close[1]
+diff = upper > upper[1] ? r : lower < lower[1] ? -r : d
+num = ta.rma(diff, rsi_length)
+den = ta.rma(math.abs(diff), rsi_length)
+arsi = num / den * 50 + 50
+rsi_signal = ta.ema(arsi, rsi_smooth)
+
+rsi_bullish = arsi > rsi_signal and arsi < rsi_ob
+rsi_bearish = arsi < rsi_signal and arsi > rsi_os
+
+// Adaptive MACD
+var macd_line = 0.
+var lag = (macd_signal - 1) / 2
+var a1 = 2 / (macd_fast + 1)
+var a2 = 2 / (macd_slow + 1)
+
+r2 = 0.5 * math.pow(ta.correlation(close, bar_index, macd_r2_length), 2) + 0.5
+K = r2 * ((1 - a1) * (1 - a2)) + (1 - r2) * ((1 - a1) / (1 - a2))
+
+macd_line := (close - close[1]) * (a1 - a2) + (-a2 - a1 + 2) * nz(macd_line[1]) - K * nz(macd_line[2])
+macd_ema = ta.ema(macd_line, macd_signal)
+macd_hist = macd_line - macd_ema
+
+macd_bullish = macd_line > macd_ema and macd_hist > macd_hist[1]
+macd_bearish = macd_line < macd_ema and macd_hist < macd_hist[1]
+
+// VWAP
+var float vwap_sum_pv = 0.0
+var float vwap_sum_v = 0.0
+var float vwap_sum_pv2 = 0.0
+
+is_new_session = ta.change(time("1D")) != 0
+reset_vwap = vwap_anchor == "Session" ? is_new_session : vwap_anchor == "Day" ? is_new_session : ta.change(time("1W")) != 0
+
+if reset_vwap
+    vwap_sum_pv := 0.0
+    vwap_sum_v := 0.0
+    vwap_sum_pv2 := 0.0
+
+typical_price = hlc3
+vol = volume
+
+vwap_sum_pv := vwap_sum_pv + (typical_price * vol)
+vwap_sum_v := vwap_sum_v + vol
+vwap_sum_pv2 := vwap_sum_pv2 + (typical_price * typical_price * vol)
+
+vwap_value = vwap_sum_v > 0 ? vwap_sum_pv / vwap_sum_v : na
+variance = vwap_sum_v > 0 ? (vwap_sum_pv2 / vwap_sum_v) - (vwap_value * vwap_value) : na
+std_dev = variance > 0 ? math.sqrt(variance) : na
+
+vwap_upper1 = vwap_value + (std_dev * vwap_mult1)
+vwap_lower1 = vwap_value - (std_dev * vwap_mult1)
+
+vwap_bullish = close > vwap_value and close > vwap_value[1]
+vwap_bearish = close < vwap_value and close < vwap_value[1]
+
+// OBV Oscillator
+obv_value = ta.cum(ta.change(close) > 0 ? volume : ta.change(close) < 0 ? -volume : 0*volume)
+obv_ema = ta.ema(obv_value, obv_length)
+obv_osc = obv_value - obv_ema
+
+obv_bullish = obv_osc > 0 and obv_osc > obv_osc[1]
+obv_bearish = obv_osc < 0 and obv_osc < obv_osc[1]
+
+// Bollinger Band Width Percentile (voor volatiliteit)
+bbw = ta.bbw(close, 13, 1)
+bbwp = ta.percentrank(bbw, 252)
+
+// Volatility adjustment voor position sizing
+vol_multiplier = bbwp > 75 ? 0.7 : bbwp < 25 ? 1.3 : 1.0
+
+// Candlestick Patterns (simplified)
+doji = math.abs(open - close) <= (high - low) * 0.05
+bullish_engulfing = open[1] > close[1] and close > open and close >= open[1] and close[1] >= open and close - open > open[1] - close[1]
+bearish_engulfing = close[1] > open[1] and open > close and open >= close[1] and open[1] >= close and open - close > close[1] - open[1]
+
+pattern_bullish = bullish_engulfing
+pattern_bearish = bearish_engulfing
+
+// ===== SCORING SYSTEEM ===== //
+
+// Trend Layer Score (0-100)
+trend_score = 0.0
+trend_score := (st_bullish ? 33.3 : st_bearish ? -33.3 : 0) + 
+               (ichi_bullish ? 33.3 : ichi_bearish ? -33.3 : 0) + 
+               (ma_bullish ? 33.4 : ma_bearish ? -33.4 : 0)
+
+// Momentum Layer Score (0-100)  
+momentum_score = 0.0
+momentum_score := (rsi_bullish ? 50.0 : rsi_bearish ? -50.0 : 0) + 
+                  (macd_bullish ? 50.0 : macd_bearish ? -50.0 : 0)
+
+// Volume Layer Score (0-100)
+volume_score = 0.0
+volume_score := (vwap_bullish ? 50.0 : vwap_bearish ? -50.0 : 0) + 
+                (obv_bullish ? 50.0 : obv_bearish ? -50.0 : 0)
+
+// Pattern Layer Score (0-100)
+pattern_score = pattern_bullish ? 100.0 : pattern_bearish ? -100.0 : 0
+
+// Gewogen Totaal Score
+total_weight = trend_weight + momentum_weight + volume_weight + pattern_weight
+final_score = (trend_score * trend_weight/100 + 
+               momentum_score * momentum_weight/100 + 
+               volume_score * volume_weight/100 + 
+               pattern_score * pattern_weight/100) / (total_weight/100)
+
+// Confirmatie tellen
+confirmations = 0
+confirmations += trend_score > 50 ? 1 : trend_score < -50 ? -1 : 0
+confirmations += momentum_score > 50 ? 1 : momentum_score < -50 ? -1 : 0  
+confirmations += volume_score > 50 ? 1 : volume_score < -50 ? -1 : 0
+confirmations += pattern_score > 50 ? 1 : pattern_score < -50 ? -1 : 0
+
+abs_confirmations = math.abs(confirmations)
+
+// Market Regime Detection
+regime_bullish = ma10 > ma50 and ma50 > ma200 and close > ma200
+regime_bearish = ma10 < ma50 and ma50 < ma200 and close < ma200
+regime_sideways = not regime_bullish and not regime_bearish
+
+// Regime aanpassing
+regime_multiplier = 1.0
+if use_regime_filter
+    regime_multiplier := regime_bullish and final_score > 0 ? 1.2 : 
+                        regime_bearish and final_score < 0 ? 1.2 : 
+                        regime_sideways ? 0.8 : 1.0
+
+adjusted_score = final_score * regime_multiplier
+
+// ===== TRADE SIGNALEN ===== //
+long_condition = adjusted_score > consensus_threshold and abs_confirmations >= min_confirmations and confirmations > 0
+short_condition = adjusted_score < -consensus_threshold and abs_confirmations >= min_confirmations and confirmations < 0
+
+// Position Sizing
+base_qty = 10.0
+volatility_adjusted_qty = base_qty * vol_multiplier
+
+// Stop Loss & Take Profit
+atr_current = ta.atr(atr_length)
+sl_distance = sl_type == "ATR" ? atr_current * sl_atr_mult : 
+              sl_type == "Percentage" ? close * sl_percentage / 100 : 
+              sl_type == "SuperTrend" ? math.abs(close - (st_dir == 1 ? longStop : shortStop)) : atr_current * 2
+
+tp_distance = sl_distance * tp_ratio
+
+// ===== STRATEGIE EXECUTIE ===== //
+if long_condition and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, qty=volatility_adjusted_qty)
+    strategy.exit("LONG EXIT", "LONG", stop=close - sl_distance, limit=close + tp_distance)
+
+if short_condition and strategy.position_size == 0  
+    strategy.entry("SHORT", strategy.short, qty=volatility_adjusted_qty)
+    strategy.exit("SHORT EXIT", "SHORT", stop=close + sl_distance, limit=close - tp_distance)
+
+// ===== VISUALISATIE ===== //
+
+// SuperTrend Plot
+st_color = st_dir == 1 ? color.green : color.red
+plot(st_dir == 1 ? longStop : na, "SuperTrend Long", st_color, 2)
+plot(st_dir == -1 ? shortStop : na, "SuperTrend Short", st_color, 2)
+
+// VWAP Plot  
+plot(vwap_value, "VWAP", color.blue, 1)
+vwap_upper_plot = plot(vwap_bands ? vwap_upper1 : na, "VWAP Upper", color.gray)
+vwap_lower_plot = plot(vwap_bands ? vwap_lower1 : na, "VWAP Lower", color.gray)
+fill(vwap_upper_plot, vwap_lower_plot, color.new(color.blue, 95), "VWAP Fill")
+
+// Moving Averages
+plot(ma10, "MA 10", color.orange, 1)
+plot(ma50, "MA 50", color.yellow, 2) 
+plot(ma200, "MA 200", color.purple, 3)
+
+// Trend Fill
+ma_fill_color = regime_bullish ? color.new(color.green, 95) : 
+                regime_bearish ? color.new(color.red, 95) : 
+                color.new(color.gray, 98)
+
+fill_1 = plot(show_trend_fill ? ma10 : na, display=display.none)
+fill_2 = plot(show_trend_fill ? ma50 : na, display=display.none) 
+fill(fill_1, fill_2, ma_fill_color, "Trend Fill")
+
+// Signalen
+plotshape(long_condition and show_signals, "Long Signal", shape.triangleup, location.belowbar, color.green, size=size.normal, text="🚀 LONG")
+plotshape(short_condition and show_signals, "Short Signal", shape.triangledown, location.abovebar, color.red, size=size.normal, text="🔻 SHORT")
+
+// Score Tabel
+if show_table and barstate.islast
+    var table score_table = table.new(position.top_right, 3, 7, bgcolor=color.new(color.black, 80), border_width=1)
+    
+    // Headers
+    table.cell(score_table, 0, 0, "📊 ULTIMATE STRATEGY", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 50))
+    table.cell(score_table, 1, 0, "Score", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 50))
+    table.cell(score_table, 2, 0, "Status", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.blue, 50))
+    
+    // Trend Layer
+    trend_color = trend_score > 50 ? color.green : trend_score < -50 ? color.red : color.gray
+    table.cell(score_table, 0, 1, "📈 Trend", text_color=color.white, text_size=size.small)
+    table.cell(score_table, 1, 1, str.tostring(math.round(trend_score, 1)), text_color=trend_color, text_size=size.small)
+    table.cell(score_table, 2, 1, trend_score > 50 ? "🟢 Bull" : trend_score < -50 ? "🔴 Bear" : "🟡 Neutraal", text_color=color.white, text_size=size.small)
+    
+    // Momentum Layer  
+    momentum_color = momentum_score > 50 ? color.green : momentum_score < -50 ? color.red : color.gray
+    table.cell(score_table, 0, 2, "⚡ Momentum", text_color=color.white, text_size=size.small)
+    table.cell(score_table, 1, 2, str.tostring(math.round(momentum_score, 1)), text_color=momentum_color, text_size=size.small)
+    table.cell(score_table, 2, 2, momentum_score > 50 ? "🟢 Bull" : momentum_score < -50 ? "🔴 Bear" : "🟡 Neutraal", text_color=color.white, text_size=size.small)
+    
+    // Volume Layer
+    volume_color = volume_score > 50 ? color.green : volume_score < -50 ? color.red : color.gray  
+    table.cell(score_table, 0, 3, "📊 Volume", text_color=color.white, text_size=size.small)
+    table.cell(score_table, 1, 3, str.tostring(math.round(volume_score, 1)), text_color=volume_color, text_size=size.small)
+    table.cell(score_table, 2, 3, volume_score > 50 ? "🟢 Bull" : volume_score < -50 ? "🔴 Bear" : "🟡 Neutraal", text_color=color.white, text_size=size.small)
+    
+    // Pattern Layer
+    pattern_color = pattern_score > 50 ? color.green : pattern_score < -50 ? color.red : color.gray
+    table.cell(score_table, 0, 4, "🕯️ Patterns", text_color=color.white, text_size=size.small)  
+    table.cell(score_table, 1, 4, str.tostring(math.round(pattern_score, 1)), text_color=pattern_color, text_size=size.small)
+    table.cell(score_table, 2, 4, pattern_score > 50 ? "🟢 Bull" : pattern_score < -50 ? "🔴 Bear" : "🟡 Neutraal", text_color=color.white, text_size=size.small)
+    
+    // Final Score
+    final_color = adjusted_score > consensus_threshold ? color.green : adjusted_score < -consensus_threshold ? color.red : color.yellow
+    table.cell(score_table, 0, 5, "🎯 FINAL", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.navy, 50))
+    table.cell(score_table, 1, 5, str.tostring(math.round(adjusted_score, 1)), text_color=final_color, text_size=size.normal, bgcolor=color.new(color.navy, 50))
+    table.cell(score_table, 2, 5, adjusted_score > consensus_threshold ? "🚀 LONG" : adjusted_score < -consensus_threshold ? "🔻 SHORT" : "⏸️ WACHT", text_color=color.white, text_size=size.normal, bgcolor=color.new(color.navy, 50))
+    
+    // Confirmations
+    table.cell(score_table, 0, 6, "✅ Confirm", text_color=color.white, text_size=size.small)
+    table.cell(score_table, 1, 6, str.tostring(abs_confirmations) + "/4", text_color=color.white, text_size=size.small)
+    table.cell(score_table, 2, 6, "Vol: " + str.tostring(math.round(bbwp, 1)) + "%", text_color=color.white, text_size=size.small)
+
+// ===== ALERTS ===== //
+alertcondition(long_condition, "🚀 ULTIMATE LONG", "ULTIMATE STRATEGY: LONG SIGNAL - Score: {{plot('final_score')}}")
+alertcondition(short_condition, "🔻 ULTIMATE SHORT", "ULTIMATE STRATEGY: SHORT SIGNAL - Score: {{plot('final_score')}}")
+alertcondition(ta.crossover(adjusted_score, consensus_threshold), "📈 Score Boven Drempel", "Score kruist boven consensus drempel")
+alertcondition(ta.crossunder(adjusted_score, -consensus_threshold), "📉 Score Onder Drempel", "Score kruist onder consensus drempel")
+
+// Plot voor alerts
+plot(adjusted_score, "Final Score", display=display.none)
+plot(bbwp, "BBWP", display=display.none)
